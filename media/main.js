@@ -402,9 +402,9 @@
                     addEdge(edge);
                 }
 
-                // --- set up graph ---
+                // --- stylesheet for graph ---
 
-                let style = [ // the stylesheet for the graph
+                let style = [
                     {
                         selector: 'node',
                         style: {
@@ -430,11 +430,18 @@
                         }
                     }
                 ];
+
+                // --- layout for graph ---
+
                 let layout_opts = {
                     name: 'breadthfirst',
                     fit: true,
-                    animate: "end"
+                    animate: "end",
+                    grid: true // might be a good option
                 };
+
+                // --- setup for graph ---
+
                 var cy = cytoscape({
                     container: network,
                     elements: cytoElements,

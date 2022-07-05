@@ -15,6 +15,8 @@ const path = require('path');
 const os = require('os');
 const { spawnAsync } = require('./utils/spawnAsync.js');
 const { getPythonPath } = require('./utils/getPythonPath.js');
+const { spawn } = require('child_process');
+const { exit } = require('process');
 
 // this method is called when your extension is activated
 // your extension is activated the very first time the command is executed
@@ -24,17 +26,37 @@ const { getPythonPath } = require('./utils/getPythonPath.js');
  */
 function activate(context) {
 	// TODO: Re-write this as TypeScript and use the compiler instead
-	// Get an ouput channel
+
+	let PYBNG_VERSION = "0.5.0" // does this need to be in a particular spot?
+
+	// --- do some setup automatically once the extension is activated ---
+
+	// get an ouput channel
 	var bngl_channel = vscode.window.createOutputChannel("BNGL");
-	// This line of code will only be executed once when your extension is activated
-	// check if the auto-setup configuration option is turned on
+	// get configuration settings
 	var config = vscode.workspace.getConfiguration("bngl");
-	if (config.general.auto_install) {
-		bngl_channel.appendLine("Running BNG auto-install ...");
-		vscode.commands.executeCommand('bng.setup');
+
+	async function runAutoInstall () {
+		// check if the auto-setup configuration option is turned on
+		if (config.general.auto_install) {
+			bngl_channel.appendLine("Running BNG auto-install ...");
+			await vscode.commands.executeCommand('bng.setup');
+		}	
 	}
 
-	let PYBNG_VERSION = "0.5.0"
+	// make sure setup is done before starting other automatic tasks
+	// (otherwise async commands will run simultaneously-ish and log to output channel in an unpredictable order)
+	runAutoInstall().then(() => {
+		// check if auto-visualize configuration option is turned on,
+		// if so then run the command to generate a contact map
+		if (config.general.auto_visualize) {
+			// turn this back on
+			// vscode.commands.executeCommand('bng.contactmap');
+		}
+	});
+	// note on async commands: there is currently nothing stopping a user from invoking a command while another command is running
+
+	// --- define command handlers & associated functions ---
 
 	// function that deals with running bngl files
 	function runCommandHandler() {
@@ -128,49 +150,121 @@ function activate(context) {
 		// Started running, let the user know
 		vscode.window.showInformationMessage(`Started running ${fname} in folder ${fname_noext}/${fold_name}`);
 	}
+
 	// function that deals with visualizing bngl files
-	function vizCommandHandler() {
-		// first we try to grab our terminal and create one if it doesn't exist
-		let term = vscode.window.terminals.find(i => i.name == "bngl_term");
-		if (term == undefined) {
-			term = vscode.window.createTerminal("bngl_term");
+	async function vizCommandHandler() {
+		await visualize("all");
+	}
+
+	// 
+	async function contactmapCommandHandler() {
+		// check if a bngl file is open
+
+		// let outputPath = "";
+		// both a parameter for visualize and where to later look for file (?)
+
+		const visualizeResult = await visualize("contactmap");
+		const exitCode = visualizeResult.exitCode;
+		let outputPath = visualizeResult.outputPath; // type/format?
+
+		// if exit code is not 0, don't do anything
+		if (exitCode) {
+
 		}
-		// next we make a folder friendly time stamp
+		// if exit code is 0, proceed
+		else {
+			// get active bngl file (check this is okay?)
+			let fname = vscode.window.activeTextEditor.document.fileName;
+			fname = path.basename(fname, ".bngl");
+
+			// put together name (including path) of corresponding contact map graphml file
+			// let contactmap_fname = outputPath + "/" + fname + "_contactmap.graphml";
+			let contactmap_fname = fname + "_contactmap.graphml";
+
+			// look for this file - figure out how to get the correct outputPath (where is it created?)
+			// I feel like this is not generally correct
+			let found = await vscode.workspace.findFiles(outputPath + "/" + contactmap_fname); // ``
+			let contactmap_path = found[0].path; // bad
+			
+			// make webview
+
+			// could also use vscode.open if options are not needed
+			let open = await vscode.workspace.openTextDocument(contactmap_path);
+			vscode.window.showTextDocument(open, {preserveFocus: false});
+
+			// what is auto_open?
+
+			// now auto-run the webview command?
+			// check that graphml file is actually open?
+			console.log(vscode.window.activeTextEditor.document.fileName);
+			// for some reason the active thing is the bngl not the graphml so this does not work
+			// find a way to do it without actually showing the graphml
+			// vscode.commands.executeCommand('bng.webview');
+			// need to modify plotpanel.create to make it work with files other than the currently active (?)
+		}
+	}
+
+	// runs visualization of *active* bngl file & returns exit code
+	// type: type of visualization, can be one of the following
+	// "contactmap", "ruleviz_pattern", "ruleviz_operation", "regulatory", "all"
+	// outputPath: path of folder in which output should be saved
+	async function visualize(type, outputPath) {
+
+		// --- create new folder to store results of visualization ---
+		// workspace URI / name of active bngl file / time stamp
+
+		// get workspace URI
+		let curr_workspace_uri = vscode.workspace.getWorkspaceFolder(vscode.window.activeTextEditor.document.uri).uri;
+
+		// find basename of the file we are working with
+		let fname = vscode.window.activeTextEditor.document.fileName; // this contains entire path
+		// get base name
+		fname = path.basename(fname); // this is just the file name
+		// remove extension
+		// TODO: Do a check here to make sure extension exists
+		let fname_noext = fname.replace(".bngl", "");
+
+		// make a folder friendly time stamp
 		const date = new Date();
 		const year = date.getFullYear();
 		const month = `${date.getMonth() + 1}`.padStart(2, '0');
 		const day = `${date.getDate()}`.padStart(2, '0');
 		const seconds = `${date.getSeconds()}`.padStart(2, '0');
 		const fold_name = `${year}_${month}_${day}__${date.getHours()}_${date.getMinutes()}_${seconds}`
-		// Get workspace URI
-		let curr_workspace_uri = vscode.workspace.getWorkspaceFolder(vscode.window.activeTextEditor.document.uri).uri;
-		// find basename of the file we are working with
-		let fname = vscode.window.activeTextEditor.document.fileName;
-		// get base name
-		fname = path.basename(fname);
-		// remove extension
-		// TODO: Do a check here to make sure extension exists
-		let fname_noext = fname.replace(".bngl", "");
-		// Get folder URI to make the new folder
+
+		// get folder URI to make the new folder
 		let new_fold_uri = vscode.Uri.joinPath(curr_workspace_uri, fname_noext, fold_name);
+		
+		// create new folder and copy the active file into our new folder
 		// get current file path
 		let curr_doc_uri = vscode.window.activeTextEditor.document.uri;
 		// set the path to be copied to
 		let copy_path = vscode.Uri.joinPath(new_fold_uri, fname);
-		// Create new directory and copy the file into our new folder
 		// FIXME: if a file of the same name as the folder exists
 		// this command fails to run. At least let the user know
 		vscode.workspace.fs.createDirectory(new_fold_uri).then(() => {
 			vscode.workspace.fs.copy(curr_doc_uri, copy_path);
 		});
-		// set the terminal command we want to run
-		let term_cmd = `bionetgen -req "${PYBNG_VERSION}" visualize -i "${copy_path.fsPath}" -o "${new_fold_uri.fsPath}" -t "all"`;
-		// focus on the terminal and run the command
-		term.show();
-		term.sendText(term_cmd);
-		// Started running, let the user know
+
+		// --- run visualization ---
+
+		const inputPath = copy_path.fsPath;
+
+		// should actually use parameter outputPath (what format?)
+		const visualizeExitCode = await spawnAsync(
+			'bionetgen', ['-req', PYBNG_VERSION, 'visualize', '-i', inputPath, '-o', new_fold_uri.fsPath, '-t', type],
+			bngl_channel);
+		
+		// started running, let the user know
 		vscode.window.showInformationMessage(`Started visualizing ${fname} in folder ${fname_noext}/${fold_name}`);
+		// maybe don't show this all the time (eg. on auto-visualize)
+		
+		return {
+			exitCode: visualizeExitCode,
+			outputPath: fname_noext + "/" + fold_name // ???
+		};
 	}
+
 	// one function for plotting gdat/cdat/scan files
 	function plotDatCommandHandler() {
 		let term = vscode.window.terminals.find(i => i.name == "bngl_term");
@@ -209,8 +303,9 @@ function activate(context) {
 		}
 		);
 	}
+
 	// command to handle installation of bionetgen
-	// called when extension is activated
+	// called automatically when extension is activated
 	async function setupCommandHandler() {
 		bngl_channel.appendLine("Checking for perl.");
 		const perlCheckExitCode = await spawnAsync('perl', ['-v'], bngl_channel);
@@ -256,6 +351,7 @@ function activate(context) {
 			// todo: check version of bionetgen? prompt user to upgrade?
 		}
 	}
+
 	// command to manually upgrade bionetgen
 	async function upgradeCommandHandler() {
 		bngl_channel.appendLine("Running BNG upgrade ...");
@@ -279,6 +375,9 @@ function activate(context) {
 			vscode.window.showInformationMessage("BNG upgrade complete.");
 		}
 	}
+
+	// --- register commands ---
+
 	// names of the commands we want to register
 	const runCommandName = 'bng.run_bngl';
 	const vizCommandName = 'bng.run_viz';
@@ -286,6 +385,7 @@ function activate(context) {
 	const webviewCommandName = 'bng.webview';
 	const setupCommandName = 'bng.setup';
 	const upgradeCommandName = 'bng.upgrade';
+	const contactmapCommandName = 'bng.contactmap';
 	// The command has been defined in the package.json file
 	// Now provide the implementation of the command with  registerCommand
 	// The commandId parameter must match the command field in package.json
@@ -306,6 +406,9 @@ function activate(context) {
 	// this one upgrades bionetgen
 	let disposable6 = vscode.commands.registerCommand(upgradeCommandName, upgradeCommandHandler);
 	context.subscriptions.push(disposable6);
+	// this command visualizes a contact map & opens it in a webview panel
+	let disposable7 = vscode.commands.registerCommand(contactmapCommandName, contactmapCommandHandler);
+	context.subscriptions.push(disposable7);
 	// TODO make this work
 	// resurrect webview 
 	// if (vscode.window.registerWebviewPanelSerializer) {
@@ -427,20 +530,19 @@ class PlotPanel {
 	/** @type {vscode.TextDocument} */
 	_document;
 	// /** @type {} */
-	_config
+	_config;
 	/** @type {vscode.Uri} */
 	scriptUri;
 	/** @type {vscode.Uri} */
 	plotlyUri;
 	/** @type {vscode.Uri} */
-	cytoUri
+	cytoUri;
 	/** @type {vscode.Uri} */
 	cytoGraphMLUri;
 	/** @type {vscode.Uri} */
-	jqUri
+	jqUri;
 	/** @type {vscode.Uri} */
-	stylesMainUri
-
+	stylesMainUri;
 
 	/**
 	 * Tracks plot panel
@@ -823,7 +925,9 @@ class PlotPanel {
 			column || vscode.ViewColumn.Active,
 			{
 				enableScripts: true,
-				localResourceRoots: [vscode.Uri.joinPath(extensionUri, 'media')],
+				localResourceRoots: [
+					vscode.Uri.joinPath(extensionUri, 'media')
+				],
 				retainContextWhenHidden: true
 			}
 		);
